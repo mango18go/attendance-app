@@ -19,7 +19,7 @@ def safe_sheet_name(name):
 
 def find_header_row(raw):
     for i in range(len(raw)):
-        row_text = " ".join(raw.iloc[i].astype(str).tolist())
+        row_text = " ".join(raw.iloc[i].fillna("").astype(str).tolist())
         if ("날짜" in row_text or "일자" in row_text) and ("출근" in row_text or "퇴근" in row_text):
             return i
     return None
