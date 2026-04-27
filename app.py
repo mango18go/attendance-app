@@ -16,54 +16,62 @@ def extract_end_time(value):
 
 def safe_sheet_name(name):
     invalid = ["\\", "/", "*", "[", "]", ":", "?"]
-    name = str(name)
     for ch in invalid:
-        name = name.replace(ch, "")
+        name = str(name).replace(ch, "")
     return name[:31]
 
 if attendance_file:
-    xls = pd.ExcelFile(attendance_file)
 
-    if "가공" in xls.sheet_names:
-        attendance = pd.read_excel(attendance_file, sheet_name="가공")
-    else:
-        attendance = pd.read_excel(attendance_file)
+    # 👉 헤더 문제 해결 (중요)
+    attendance = pd.read_excel(attendance_file, sheet_name="가공", header=1)
 
+    # 컬럼 정리
     attendance.columns = attendance.columns.astype(str).str.strip()
 
+    # 컬럼 이름 통일
     attendance = attendance.rename(columns={
         "성명": "사용자명",
         "이름": "사용자명",
+        "직원명": "사용자명",
         "출근시간": "첫출근",
-        "퇴근시간": "마지막퇴근",
         "출근": "첫출근",
-        "퇴근": "마지막퇴근"
+        "첫출근시간": "첫출근",
+        "퇴근시간": "마지막퇴근",
+        "퇴근": "마지막퇴근",
+        "최종퇴근": "마지막퇴근"
     })
 
+    st.write("현재 컬럼:", list(attendance.columns))
+
+    # 필수 컬럼 체크
     needed = ["날짜", "사용자명", "첫출근", "마지막퇴근"]
     missing = [c for c in needed if c not in attendance.columns]
 
     if missing:
-        st.error(f"필수 컬럼이 없습니다: {missing}")
-        st.write("현재 컬럼:", list(attendance.columns))
+        st.error(f"필수 컬럼 없음: {missing}")
         st.stop()
 
+    # 부서 없으면 생성
     if "부서명" not in attendance.columns:
         attendance["부서명"] = ""
 
+    # 날짜/시간 변환
     attendance["날짜"] = pd.to_datetime(attendance["날짜"], errors="coerce").dt.date
     attendance["첫출근"] = pd.to_datetime(attendance["첫출근"], errors="coerce")
     attendance["마지막퇴근"] = pd.to_datetime(attendance["마지막퇴근"], errors="coerce")
 
-    result = attendance.groupby(["날짜", "사용자명", "부서명"], as_index=False).agg({
+    # 👉 하루 1명 기준으로 묶기
+    df = attendance.groupby(["날짜", "사용자명", "부서명"], as_index=False).agg({
         "첫출근": "min",
         "마지막퇴근": "max"
     })
 
-    result["퇴근기준"] = "18:00:00"
+    # 기본 퇴근시간
+    df["퇴근기준"] = "18:00:00"
 
-    if "4월 유연근무" in xls.sheet_names:
-        flex = pd.read_excel(attendance_file, sheet_name="4월 유연근무")
+    # 👉 유연근무 처리 (있을 때만)
+    try:
+        flex = pd.read_excel(attendance_file, sheet_name="4월 유연근무", header=0)
         flex.columns = flex.columns.astype(str).str.strip()
 
         if "성명" in flex.columns and "유연근무시간" in flex.columns:
@@ -71,16 +79,20 @@ if attendance_file:
             flex = flex.rename(columns={"성명": "사용자명"})
             flex = flex[["사용자명", "퇴근기준"]].drop_duplicates()
 
-            result = result.merge(flex, on="사용자명", how="left", suffixes=("", "_유연"))
-            result["퇴근기준"] = result["퇴근기준_유연"].fillna(result["퇴근기준"])
-            result = result.drop(columns=["퇴근기준_유연"])
+            df = df.merge(flex, on="사용자명", how="left", suffixes=("", "_유연"))
+            df["퇴근기준"] = df["퇴근기준_유연"].fillna(df["퇴근기준"])
+            df = df.drop(columns=["퇴근기준_유연"])
 
+    except:
+        pass
+
+    # 추가근무 계산
     def calc_overtime(row):
         if pd.isna(row["마지막퇴근"]):
             return 0
 
         base = pd.to_datetime(f"{row['날짜']} {row['퇴근기준']}", errors="coerce")
-        actual = pd.to_datetime(row["마지막퇴근"], errors="coerce")
+        actual = row["마지막퇴근"]
 
         if pd.isna(base) or pd.isna(actual):
             return 0
@@ -90,14 +102,16 @@ if attendance_file:
 
         return 0
 
-    result["추가근무(시간)"] = result.apply(calc_overtime, axis=1)
+    df["추가근무(시간)"] = df.apply(calc_overtime, axis=1)
 
-    # 화면 표시용 시간 변환
-    result["첫출근"] = result["첫출근"].dt.strftime("%H:%M:%S")
-    result["마지막퇴근"] = result["마지막퇴근"].dt.strftime("%H:%M:%S")
+    # 보기용 포맷
+    df["첫출근"] = df["첫출근"].dt.strftime("%H:%M:%S")
+    df["마지막퇴근"] = df["마지막퇴근"].dt.strftime("%H:%M:%S")
 
+    # ---------------------------
     # 1. 전체 직원 요약
-    all_summary = result.groupby(["사용자명", "부서명"], as_index=False).agg({
+    # ---------------------------
+    all_summary = df.groupby(["사용자명", "부서명"], as_index=False).agg({
         "날짜": "count",
         "추가근무(시간)": "sum"
     }).rename(columns={
@@ -105,8 +119,10 @@ if attendance_file:
         "추가근무(시간)": "총 추가근무시간"
     })
 
+    # ---------------------------
     # 2. 부서별 요약
-    dept_summary = result.groupby("부서명", as_index=False).agg({
+    # ---------------------------
+    dept_summary = df.groupby("부서명", as_index=False).agg({
         "사용자명": "nunique",
         "날짜": "count",
         "추가근무(시간)": "sum"
@@ -123,23 +139,24 @@ if attendance_file:
     st.dataframe(dept_summary)
 
     st.subheader("상세 결과")
-    st.dataframe(result)
+    st.dataframe(df)
 
+    # ---------------------------
+    # 엑셀 다운로드
+    # ---------------------------
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         all_summary.to_excel(writer, index=False, sheet_name="전체직원요약")
         dept_summary.to_excel(writer, index=False, sheet_name="부서별요약")
-        result.to_excel(writer, index=False, sheet_name="전체상세")
+        df.to_excel(writer, index=False, sheet_name="전체상세")
 
-        for name in sorted(result["사용자명"].dropna().unique()):
-            person_df = result[result["사용자명"] == name]
-            sheet_name = safe_sheet_name(name)
-            person_df.to_excel(writer, index=False, sheet_name=sheet_name)
+        for name in df["사용자명"].dropna().unique():
+            person_df = df[df["사용자명"] == name]
+            person_df.to_excel(writer, index=False, sheet_name=safe_sheet_name(name))
 
     st.download_button(
-        label="결과 엑셀 다운로드",
+        "결과 엑셀 다운로드",
         data=output.getvalue(),
-        file_name="근태_추가근무_최종결과.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name="근태_최종결과.xlsx"
     )
