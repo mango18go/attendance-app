@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from datetime import datetime, date, time
+from datetime import datetime
 
 st.title("근태 자동판정 프로그램")
 
@@ -20,15 +20,15 @@ def safe_sheet_name(name):
 def find_header_row(raw):
     for i in range(len(raw)):
         row_text = " ".join(raw.iloc[i].fillna("").astype(str).tolist())
-        if ("날짜" in row_text or "일자" in row_text) and ("출근" in row_text or "퇴근" in row_text):
+        if ("수신날짜" in row_text or "날짜" in row_text or "일자" in row_text) and ("사용자명" in row_text or "성명" in row_text):
             return i
     return None
 
 def find_col(df, keywords):
     for col in df.columns:
-        c = clean_text(col)
-        for k in keywords:
-            if k in c:
+        col_clean = clean_text(col)
+        for keyword in keywords:
+            if keyword in col_clean:
                 return col
     return None
 
@@ -69,54 +69,61 @@ if attendance_file:
         header_row = find_header_row(raw)
 
         if header_row is None:
-            st.error("엑셀에서 날짜/출근/퇴근 컬럼이 있는 행을 찾지 못했습니다.")
-            st.write("시트명:", target_sheet)
-            st.write(raw.head(15))
+            st.error("엑셀에서 헤더 행을 찾지 못했습니다.")
+            st.write(raw.head(20))
             st.stop()
 
-        attendance = pd.read_excel(attendance_file, sheet_name=target_sheet, header=header_row)
-        attendance.columns = attendance.columns.astype(str).str.strip()
+        data = pd.read_excel(attendance_file, sheet_name=target_sheet, header=header_row)
+        data.columns = data.columns.astype(str).str.strip()
 
-        date_col = find_col(attendance, ["날짜", "일자"])
-        name_col = find_col(attendance, ["사용자명", "성명", "직원명", "이름"])
-        dept_col = find_col(attendance, ["부서명", "부서", "소속"])
-        in_col = find_col(attendance, ["첫출근", "출근시간", "출근"])
-        out_col = find_col(attendance, ["마지막퇴근", "최종퇴근", "퇴근시간", "퇴근"])
+        date_col = find_col(data, ["수신날짜", "날짜", "일자"])
+        time_col = find_col(data, ["수신시간", "시간"])
+        name_col = find_col(data, ["사용자명", "성명", "직원명", "이름"])
+        dept_col = find_col(data, ["부서명", "부서", "소속"])
+        type_col = find_col(data, ["출퇴근", "구분"])
 
         missing = []
         if date_col is None:
-            missing.append("날짜")
+            missing.append("수신날짜/날짜")
+        if time_col is None:
+            missing.append("수신시간/시간")
         if name_col is None:
             missing.append("사용자명/성명")
-        if in_col is None:
-            missing.append("첫출근/출근")
-        if out_col is None:
-            missing.append("마지막퇴근/퇴근")
+        if type_col is None:
+            missing.append("출퇴근")
 
         if missing:
             st.error(f"필수 컬럼을 찾지 못했습니다: {missing}")
-            st.write("현재 컬럼:", list(attendance.columns))
+            st.write("현재 컬럼:", list(data.columns))
             st.stop()
 
         df = pd.DataFrame()
-        df["날짜"] = attendance[date_col]
-        df["사용자명"] = attendance[name_col]
-        df["부서명"] = attendance[dept_col] if dept_col else ""
-        df["첫출근"] = attendance[in_col]
-        df["마지막퇴근"] = attendance[out_col]
+        df["날짜"] = pd.to_datetime(data[date_col], errors="coerce").dt.date
+        df["시간"] = data[time_col]
+        df["사용자명"] = data[name_col]
+        df["부서명"] = data[dept_col] if dept_col else ""
+        df["출퇴근"] = data[type_col].astype(str)
 
         df = df.dropna(subset=["날짜", "사용자명"])
+        df["일시"] = df.apply(lambda r: combine_date_time(r["날짜"], r["시간"]), axis=1)
 
-        df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce").dt.date
-        df["첫출근_dt"] = df.apply(lambda r: combine_date_time(r["날짜"], r["첫출근"]), axis=1)
-        df["마지막퇴근_dt"] = df.apply(lambda r: combine_date_time(r["날짜"], r["마지막퇴근"]), axis=1)
+        출근데이터 = df[df["출퇴근"].str.contains("출근", na=False)]
+        퇴근데이터 = df[df["출퇴근"].str.contains("퇴근", na=False)]
 
-        df = df.groupby(["날짜", "사용자명", "부서명"], as_index=False).agg({
-            "첫출근_dt": "min",
-            "마지막퇴근_dt": "max"
-        })
+        첫출근 = 출근데이터.groupby(["날짜", "사용자명", "부서명"], as_index=False)["일시"].min()
+        첫출근 = 첫출근.rename(columns={"일시": "첫출근_dt"})
 
-        df["퇴근기준"] = "18:00:00"
+        마지막퇴근 = 퇴근데이터.groupby(["날짜", "사용자명", "부서명"], as_index=False)["일시"].max()
+        마지막퇴근 = 마지막퇴근.rename(columns={"일시": "마지막퇴근_dt"})
+
+        result = pd.merge(
+            첫출근,
+            마지막퇴근,
+            on=["날짜", "사용자명", "부서명"],
+            how="outer"
+        )
+
+        result["퇴근기준"] = "18:00:00"
 
         if "4월 유연근무" in xls.sheet_names:
             flex = pd.read_excel(attendance_file, sheet_name="4월 유연근무")
@@ -131,9 +138,9 @@ if attendance_file:
                 flex_df["퇴근기준"] = flex[flex_time_col].apply(extract_end_time)
                 flex_df = flex_df.dropna(subset=["사용자명"]).drop_duplicates("사용자명")
 
-                df = df.merge(flex_df, on="사용자명", how="left", suffixes=("", "_유연"))
-                df["퇴근기준"] = df["퇴근기준_유연"].fillna(df["퇴근기준"])
-                df = df.drop(columns=["퇴근기준_유연"])
+                result = result.merge(flex_df, on="사용자명", how="left", suffixes=("", "_유연"))
+                result["퇴근기준"] = result["퇴근기준_유연"].fillna(result["퇴근기준"])
+                result = result.drop(columns=["퇴근기준_유연"])
 
         def calc_overtime(row):
             if pd.isna(row["마지막퇴근_dt"]):
@@ -149,12 +156,14 @@ if attendance_file:
 
             return 0
 
-        df["추가근무(시간)"] = df.apply(calc_overtime, axis=1)
+        result["추가근무(시간)"] = result.apply(calc_overtime, axis=1)
 
-        df["첫출근"] = df["첫출근_dt"].dt.strftime("%H:%M:%S")
-        df["마지막퇴근"] = df["마지막퇴근_dt"].dt.strftime("%H:%M:%S")
+        result["첫출근"] = result["첫출근_dt"].dt.strftime("%H:%M:%S")
+        result["마지막퇴근"] = result["마지막퇴근_dt"].dt.strftime("%H:%M:%S")
 
-        final = df[["날짜", "사용자명", "부서명", "첫출근", "마지막퇴근", "퇴근기준", "추가근무(시간)"]]
+        final = result[[
+            "날짜", "사용자명", "부서명", "첫출근", "마지막퇴근", "퇴근기준", "추가근무(시간)"
+        ]]
 
         전체직원요약 = final.groupby(["사용자명", "부서명"], as_index=False).agg({
             "날짜": "count",
@@ -195,9 +204,11 @@ if attendance_file:
                 sheet_name = safe_sheet_name(name)
                 original = sheet_name
                 n = 1
+
                 while sheet_name in used_names:
                     sheet_name = safe_sheet_name(f"{original}_{n}")
                     n += 1
+
                 used_names.add(sheet_name)
 
                 person_df = final[final["사용자명"] == name]
@@ -213,4 +224,4 @@ if attendance_file:
     except Exception as e:
         st.error("처리 중 오류가 발생했습니다.")
         st.write("오류 내용:", str(e))
-        st.write("엑셀 구조나 컬럼명이 예상과 다를 수 있습니다.")
+        st.write("현재 엑셀 구조가 예상과 다를 수 있습니다.")
