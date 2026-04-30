@@ -231,7 +231,8 @@ def calc_extra(day, pairs, base_end):
     starts = []
     ends = []
 
-    # 🔥 토/일이면 전부 추가근무
+    # 🔥 핵심: target_pairs는 무조건 먼저 정의
+    if weekday in [5, 6]:
         target_pairs = pairs
         base = None   # 토/일은 기준시간 무시
     else:
@@ -241,10 +242,10 @@ def calc_extra(day, pairs, base_end):
         if pd.isna(start) or pd.isna(end):
             continue
 
-        if weekday in [5, 6]:
+        if base is None:
             count_start = start
         else:
-            count_start = max(start, base) if pd.notna(base) else start
+            count_start = max(start, base)
 
         if end > count_start:
             hours = (end - count_start).total_seconds() / 3600
