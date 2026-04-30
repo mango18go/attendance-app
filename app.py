@@ -296,10 +296,11 @@ if raw_file:
         logs["일시"] = logs.apply(lambda r: combine_date_time(r["날짜"], r["시간"]), axis=1)
         logs = logs.dropna(subset=["일시"]).sort_values(["사용자명", "날짜", "일시"])
 
-        if type_col is None or not logs["출퇴근"].str.contains("출근|퇴근", na=False).any():
-            logs["순번"] = logs.groupby(["날짜", "사용자명"]).cumcount()
-            logs["출퇴근"] = logs["순번"].apply(lambda x: "출근" if x % 2 == 0 else "퇴근")
-            logs = logs.drop(columns=["순번"])
+        if type_col is None or not logs["출퇴근"].astype(str).str.contains("출근|퇴근", na=False).any():
+           logs = logs.sort_values(["사용자명", "날짜", "일시"])  # 🔥 이 줄 추가
+           logs["순번"] = logs.groupby(["날짜", "사용자명"]).cumcount()
+           logs["출퇴근"] = logs["순번"].apply(lambda x: "출근" if x % 2 == 0 else "퇴근")
+           logs = logs.drop(columns=["순번"])
 
         flex_rules = read_flex_rules(flex_file)
 
