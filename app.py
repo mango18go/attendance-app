@@ -232,8 +232,8 @@ def calc_extra(day, pairs, base_end):
     ends = []
 
     # 🔥 토/일이면 전부 추가근무
-    if weekday in [5, 6]:
-       base = None
+        target_pairs = pairs
+        base = None   # 토/일은 기준시간 무시
     else:
         target_pairs = pairs[1:]
 
