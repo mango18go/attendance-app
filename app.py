@@ -6,7 +6,7 @@ import re
 
 st.title("근태 자동판정 프로그램")
 
-attendance_file = st.file_uploader("로우데이터 엑셀 업로드", type=["xlsx", "xls"])
+raw_file = st.file_uploader("로우데이터 엑셀 업로드", type=["xlsx", "xls"])
 flex_file = st.file_uploader("유연근무 엑셀 업로드", type=["xlsx", "xls"])
 
 def clean_text(x):
@@ -22,7 +22,9 @@ def safe_sheet_name(name):
 def find_header_row(raw):
     for i in range(len(raw)):
         row_text = " ".join(raw.iloc[i].fillna("").astype(str).tolist())
-        if ("수신시간" in row_text or "수신날짜" in row_text or "날짜" in row_text) and ("사용자명" in row_text or "성명" in row_text or "사원번호" in row_text):
+        if ("수신시간" in row_text or "수신날짜" in row_text or "날짜" in row_text) and (
+            "사용자명" in row_text or "성명" in row_text or "사원번호" in row_text
+        ):
             return i
     return None
 
@@ -112,12 +114,12 @@ def normalize_days(value):
         return ""
     return str(value).replace("요일", "").replace(",", "").replace(" ", "")
 
-def read_flex_rules(flex_file):
+def read_flex_rules(file):
     rules = []
-    if not flex_file:
+    if not file:
         return rules
 
-    file_bytes = flex_file.getvalue()
+    file_bytes = file.getvalue()
     xls = pd.ExcelFile(BytesIO(file_bytes))
     sheet = xls.sheet_names[0]
 
@@ -126,7 +128,9 @@ def read_flex_rules(flex_file):
     header_row = None
     for i in range(len(raw)):
         row_text = " ".join(raw.iloc[i].fillna("").astype(str).tolist())
-        if ("성명" in row_text or "사용자명" in row_text) and "유연근무시간" in row_text:
+        if ("성명" in row_text or "사용자명" in row_text or "이름" in row_text) and (
+            "유연근무시간" in row_text or "근무시간" in row_text
+        ):
             header_row = i
             break
 
@@ -188,7 +192,6 @@ def make_pairs(group):
         if "출근" in kind:
             if current_in is None:
                 current_in = dt
-
         elif "퇴근" in kind:
             if current_in is not None and dt >= current_in:
                 pairs.append((current_in, dt))
@@ -214,10 +217,7 @@ def calc_extra(day, pairs, base_end):
         if pd.isna(start) or pd.isna(end):
             continue
 
-        if base is None:
-            count_start = start
-        else:
-            count_start = max(start, base)
+        count_start = start if base is None else max(start, base)
 
         if end > count_start:
             hours = (end - count_start).total_seconds() / 3600
@@ -242,9 +242,9 @@ def hours_to_hms(hours):
     s = total_seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-if attendance_file:
+if raw_file:
     try:
-        file_bytes = attendance_file.getvalue()
+        file_bytes = raw_file.getvalue()
         xls = pd.ExcelFile(BytesIO(file_bytes))
 
         target_sheet = "로우" if "로우" in xls.sheet_names else xls.sheet_names[0]
@@ -262,19 +262,19 @@ if attendance_file:
 
         datetime_col = find_col(data, ["수신시간"])
         date_col = find_col(data, ["수신날짜", "날짜", "일자"])
-        time_col = find_col(data, ["24H", "시간"])
-        name_col = find_col(data, ["사용자명", "성명", "직원명", "이름"])
+        time_col = find_col(data, ["24H", "수신시각", "시각", "시간"])
+        name_col = find_col(data, ["사용자명", "성명", "직원명", "이름", "사원번호"])
         dept_col = find_col(data, ["부서명", "부서", "소속"])
         type_col = find_col(data, ["출퇴근", "출/퇴근", "구분", "신호"])
 
-        if not name_col or not type_col:
-            st.error("사용자명/출퇴근 관련 컬럼을 찾지 못했습니다.")
+        if not name_col:
+            st.error("사용자명/성명/사원번호 컬럼을 찾지 못했습니다.")
             st.write("현재 컬럼:", list(data.columns))
             st.stop()
 
         logs = pd.DataFrame()
 
-        if datetime_col:
+        if datetime_col and (date_col is None or datetime_col != date_col):
             dt_series = pd.to_datetime(data[datetime_col], errors="coerce")
             logs["날짜"] = dt_series.dt.date
             logs["시간"] = dt_series.dt.time
@@ -288,12 +288,18 @@ if attendance_file:
 
         logs["사용자명"] = data[name_col].astype(str).str.strip()
         logs["부서명"] = data[dept_col].fillna("").astype(str).str.strip() if dept_col else ""
-        logs["출퇴근"] = data[type_col].astype(str).str.strip()
+        logs["출퇴근"] = data[type_col].astype(str).str.strip() if type_col else ""
 
         logs = logs.dropna(subset=["날짜", "사용자명"])
         logs = logs[(logs["사용자명"] != "") & (logs["사용자명"] != "nan")]
         logs["요일"] = logs["날짜"].apply(weekday_kr)
         logs["일시"] = logs.apply(lambda r: combine_date_time(r["날짜"], r["시간"]), axis=1)
+        logs = logs.dropna(subset=["일시"]).sort_values(["사용자명", "날짜", "일시"])
+
+        if type_col is None or not logs["출퇴근"].str.contains("출근|퇴근", na=False).any():
+            logs["순번"] = logs.groupby(["날짜", "사용자명"]).cumcount()
+            logs["출퇴근"] = logs["순번"].apply(lambda x: "출근" if x % 2 == 0 else "퇴근")
+            logs = logs.drop(columns=["순번"])
 
         flex_rules = read_flex_rules(flex_file)
 
@@ -372,9 +378,11 @@ if attendance_file:
                 sheet_name = safe_sheet_name(name)
                 original = sheet_name
                 n = 1
+
                 while sheet_name in used_names:
                     sheet_name = safe_sheet_name(f"{original}_{n}")
                     n += 1
+
                 used_names.add(sheet_name)
 
                 final[final["사용자명"] == name].to_excel(writer, index=False, sheet_name=sheet_name)
