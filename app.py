@@ -225,16 +225,26 @@ def make_pairs(group):
 
 def calc_extra(day, pairs, base_end):
     base = pd.to_datetime(f"{day} {base_end}", errors="coerce")
+    weekday = pd.to_datetime(day).weekday()
 
     total = 0
     starts = []
     ends = []
 
-    for start, end in pairs[1:]:
+    # 🔥 토/일이면 전부 추가근무
+    if weekday in [5, 6]:
+        target_pairs = pairs
+    else:
+        target_pairs = pairs[1:]
+
+    for start, end in target_pairs:
         if pd.isna(start) or pd.isna(end):
             continue
 
-        count_start = max(start, base) if pd.notna(base) else start
+        if weekday in [5, 6]:
+            count_start = start
+        else:
+            count_start = max(start, base) if pd.notna(base) else start
 
         if end > count_start:
             hours = (end - count_start).total_seconds() / 3600
@@ -248,7 +258,18 @@ def calc_extra(day, pairs, base_end):
         if total >= 4:
             break
 
-    return round(total, 2), ", ".join(starts), ", ".join(ends)
+    return total, ", ".join(starts), ", ".join(ends)
+def hours_to_hms(hours):
+    if pd.isna(hours):
+        return "00:00:00"
+
+    total_seconds = int(round(float(hours) * 3600))
+
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    s = total_seconds % 60
+
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 if attendance_file:
     try:
@@ -342,6 +363,11 @@ if attendance_file:
             "날짜": "총 근무건수",
             "추가근무(시간)": "부서 총 추가근무시간"
         })
+
+        # 🔥 여기 추가 (중요)
+        final["추가근무(시간)"] = final["추가근무(시간)"].apply(hours_to_hms)
+        전체직원요약["총 추가근무시간"] = 전체직원요약["총 추가근무시간"].apply(hours_to_hms)
+        부서별요약["부서 총 추가근무시간"] = 부서별요약["부서 총 추가근무시간"].apply(hours_to_hms)
 
         st.subheader("전체 직원 요약")
         st.dataframe(전체직원요약)
